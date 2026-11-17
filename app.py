@@ -1,338 +1,230 @@
-"""Lotto Lab - big, simple PCSO lotto picks. Built with Streamlit.
+"""Lotto Lab - machine-learning picks for every PCSO game.
 
 Run locally:   streamlit run app.py
 
-For every game (and every draw time) the page shows:
-  * the latest official result,
-  * the pick we made for that draw and how it matched,
-  * the pick for the NEXT draw.
+For every game and draw time the page shows
+  1. the latest official result,
+  2. the 5 combinations we made BEFORE that draw, scored against it,
+  3. 5 fresh combinations for the NEXT draw,
+  4. an honest "model check": how the model did on past draws vs plain chance.
 
-Picks are calculated only from past results, so they stay the same until a
-new result arrives - then the old pick is checked against it and a fresh one
-is made. The pick blends several signals (long-run frequency, recent trend,
-short-term trend, overdue numbers) and a balance filter.
+The models (gradient boosting + logistic regression on ~25 history features)
+live in lotto_model.py; data loading lives in lotto_core.py. Picks are a pure
+function of the results, so they only change when a new result arrives.
 
-Every draw is random, so no method can guarantee a win. Not affiliated with PCSO.
+Lottery draws are random. Not affiliated with PCSO.
 """
 
 from __future__ import annotations
 
-import itertools
-import math
-from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
+import warnings
 
-import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 
-st.set_page_config(page_title="Lotto Lab", page_icon="🎱", layout="centered", initial_sidebar_state="collapsed")
+from lotto_core import GAMES, Game, load_draws, slots_for
+from lotto_model import GameReport, SlotPicks, analyze_game
 
-INK, MUTED, CARD, LINE = "#464a58", "#7b7f90", "#fcfbf8", "#e3ded4"
-PEACH, SAGE, LAVENDER = "#f0c9a6", "#a8d1c0", "#c3c9ee"
+warnings.filterwarnings("ignore")
+
+st.set_page_config(page_title="Lotto Lab", page_icon="🎱", layout="wide", initial_sidebar_state="collapsed")
+
+INK, MUTED, LINE = "#3d4150", "#767a8a", "#e8e3d9"
 
 st.markdown(
     f"""
     <style>
-    html {{font-size: 19px;}}
-    .block-container {{max-width: 820px; padding-top: 2rem;}}
-    h1 {{color:{INK}; font-weight:700; font-size:2.4rem !important}}
-    .card {{background:{CARD}; border:1px solid {LINE}; border-radius:22px; padding:1.3rem 1.5rem; margin-bottom:1.1rem}}
-    .card .head {{color:{INK}; font-size:1.45rem; font-weight:700; margin-bottom:.6rem}}
-    .card .label {{color:{MUTED}; font-size:.95rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; margin-top:.9rem}}
-    .card .note {{color:{MUTED}; font-size:1.02rem}}
-    .balls {{display:flex; gap:.55rem; flex-wrap:wrap; margin:.35rem 0}}
-    .ball {{display:inline-flex; align-items:center; justify-content:center; width:3.3rem; height:3.3rem;
-            border-radius:50%; font-weight:700; color:{INK}; font-size:1.55rem; border:1px solid rgba(0,0,0,.08)}}
-    .ball.pick {{background:radial-gradient(circle at 30% 25%, #fff7e8, {PEACH})}}
-    .ball.result {{background:radial-gradient(circle at 30% 25%, #f6f7ff, {LAVENDER})}}
-    .ball.small {{width:2.4rem; height:2.4rem; font-size:1.15rem}}
-    .ball.hit {{background:radial-gradient(circle at 30% 25%, #f1faf5, {SAGE}); border-color:#8ebba9}}
-    .ball.miss {{background:#f1eee8; color:#9a9dab}}
-    .backup {{color:{MUTED}; font-size:1.05rem; margin-top:.15rem}}
-    .foot {{color:{MUTED}; font-size:.9rem}}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+    html {{font-size: 18px;}}
+    html, body, [class*="css"], .stMarkdown, button {{font-family: 'Inter', system-ui, sans-serif !important;}}
+    .block-container {{max-width: 1080px; padding-top: 2.2rem; padding-bottom: 3rem;}}
+    #MainMenu, footer, header[data-testid="stHeader"] {{visibility: hidden; height: 0;}}
+    .hero h1 {{margin:0; font-size:2.5rem; font-weight:800; letter-spacing:-.03em; color:{INK};}}
+    .hero p {{margin:.3rem 0 1.1rem; color:{MUTED}; font-size:1.05rem;}}
+    .stats {{display:grid; grid-template-columns:repeat(3,1fr); gap:.9rem; margin:.4rem 0 1.4rem;}}
+    .stat {{background:#fffefb; border:1px solid {LINE}; border-radius:18px; padding:.9rem 1.1rem;
+            box-shadow:0 1px 2px rgba(60,50,30,.04);}}
+    .stat .k {{color:{MUTED}; font-size:.78rem; font-weight:600; text-transform:uppercase; letter-spacing:.07em;}}
+    .stat .v {{color:{INK}; font-size:1.45rem; font-weight:700; margin-top:.1rem;}}
+    .card {{background:#fffefb; border:1px solid {LINE}; border-radius:24px; padding:1.5rem 1.7rem; margin-bottom:1.3rem;
+            box-shadow:0 1px 2px rgba(60,50,30,.04), 0 10px 30px rgba(60,50,30,.06);}}
+    .card .top {{display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap;}}
+    .card .name {{font-size:1.55rem; font-weight:800; color:{INK}; letter-spacing:-.02em;}}
+    .card .sub {{color:{MUTED}; font-size:.98rem; margin-top:.1rem;}}
+    .pill {{display:inline-block; padding:.28rem .8rem; border-radius:999px; background:#eef0fb; color:#5560b8;
+            font-size:.85rem; font-weight:600;}}
+    .label {{color:{MUTED}; font-size:.8rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin:1.2rem 0 .35rem;}}
+    .cols {{display:grid; grid-template-columns:1fr 1.25fr; gap:1.8rem;}}
+    @media (max-width: 760px) {{.cols {{grid-template-columns:1fr;}} .stats {{grid-template-columns:1fr;}}}}
+    .balls {{display:flex; gap:.5rem; flex-wrap:wrap;}}
+    .ball {{display:inline-flex; align-items:center; justify-content:center; width:3.1rem; height:3.1rem; border-radius:50%;
+            font-weight:700; font-size:1.45rem; color:{INK}; border:1px solid rgba(0,0,0,.07);}}
+    .ball.result {{background:radial-gradient(circle at 30% 25%, #f7f8ff, #c5cbf0);}}
+    .ball.pick {{background:radial-gradient(circle at 30% 25%, #fff8e9, #f2cd9f);}}
+    .ball.small {{width:2.35rem; height:2.35rem; font-size:1.12rem;}}
+    .ball.hit {{background:radial-gradient(circle at 30% 25%, #f2fbf6, #a6d4c0); border-color:#8dbba7;}}
+    .ball.miss {{background:#f3f0ea; color:#a1a4b1;}}
+    .row {{display:flex; align-items:center; gap:.8rem; margin:.42rem 0;}}
+    .idx {{flex:0 0 1.6rem; height:1.6rem; border-radius:8px; background:#f1eee7; color:{MUTED}; font-size:.82rem;
+           font-weight:700; display:inline-flex; align-items:center; justify-content:center;}}
+    .score {{margin-left:.2rem; color:{MUTED}; font-weight:600; font-size:.98rem;}}
+    .note {{color:{MUTED}; font-size:.95rem; margin-top:.45rem;}}
+    .check {{margin-top:1.1rem; padding:.75rem 1rem; border-radius:14px; background:#f7f5ef; color:{MUTED}; font-size:.92rem;}}
+    .check b {{color:{INK};}}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# --------------------------------------------------------------------------- #
-# Games
-# --------------------------------------------------------------------------- #
-DATA_PATH = Path(__file__).parent / "data" / "seed_draws.csv.gz"
-HF_ROWS_URL = "https://datasets-server.huggingface.co/rows"
-HF_DATASET = "lottotayo/pcso-lotto-results"
-NUM_COLS = [f"n{i}" for i in range(1, 7)]
-LOOKBACK = 300  # past draws used to score numbers
-
-
-@dataclass(frozen=True)
-class Game:
-    key: str
-    label: str
-    picks: int
-    low: int
-    high: int
-    ordered: bool  # True: position matters (digit games, EZ2)
-
-    @property
-    def size(self) -> int:
-        return self.high - self.low + 1
-
-    @property
-    def wide(self) -> bool:
-        return self.high > 9
-
-
-GAMES: list[Game] = [
-    Game("6-58", "Ultra Lotto 6/58", 6, 1, 58, False),
-    Game("6-55", "Grand Lotto 6/55", 6, 1, 55, False),
-    Game("6-49", "Super Lotto 6/49", 6, 1, 49, False),
-    Game("6-45", "Mega Lotto 6/45", 6, 1, 45, False),
-    Game("6-42", "Lotto 6/42", 6, 1, 42, False),
-    Game("6d", "6D Lotto", 6, 0, 9, True),
-    Game("4d", "4D Lotto", 4, 0, 9, True),
-    Game("swertres", "Swertres 3D", 3, 0, 9, True),
-    Game("ez2", "EZ2 2D", 2, 1, 31, True),
-]
-BY_KEY = {g.key: g for g in GAMES}
 
 # --------------------------------------------------------------------------- #
-# Data
+# Training (cached; picks only change when new results arrive)
 # --------------------------------------------------------------------------- #
-
-
-def normalise(raw: pd.DataFrame) -> pd.DataFrame:
-    df = raw.copy()
-    df["game"] = df["game"].astype(str).str.strip().str.lower()
-    df = df[df["game"].isin(BY_KEY)].copy()
-    df["draw_date"] = pd.to_datetime(df["draw_date"], errors="coerce")
-    df["draw_time"] = df["draw_time"].fillna("").astype(str).str[:5]
-    for col in NUM_COLS + ["jackpot_php", "winners"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["draw_date"])
-
-    valid = pd.Series(False, index=df.index)
+@st.cache_resource(ttl=1800, show_spinner=False)
+def build_reports() -> tuple[pd.DataFrame, str, list[GameReport], dict[str, str]]:
+    df, status = load_draws()
+    reports: list[GameReport] = []
+    errors: dict[str, str] = {}
     for g in GAMES:
-        block = df.loc[df["game"] == g.key, NUM_COLS[: g.picks]]
-        ok = block.notna().all(axis=1) & ((block >= g.low) & (block <= g.high)).all(axis=1)
-        valid.loc[ok.index[ok]] = True
-    df = df[valid].copy()
-
-    clock = df["draw_time"].where(df["draw_time"].str.match(r"^\d{2}:\d{2}$"), "00:00")
-    df["ts"] = df["draw_date"] + pd.to_timedelta(clock + ":00")
-    df["winners"] = df["winners"].fillna(0).astype(int)
-    df = df.drop_duplicates(["game", "draw_date", "draw_time"], keep="last")
-    return df.sort_values("ts", ascending=False).reset_index(drop=True)
-
-
-def fetch_live(pages: int = 5) -> pd.DataFrame:
-    rows: list[dict] = []
-    for page in range(pages):
-        resp = requests.get(
-            HF_ROWS_URL,
-            params={"dataset": HF_DATASET, "config": "default", "split": "train", "offset": page * 100, "length": 100},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        rows += [item["row"] for item in resp.json()["rows"]]
-    return pd.DataFrame(rows)
-
-
-@st.cache_data(ttl=1800, show_spinner="Loading latest results...")
-def get_data() -> tuple[pd.DataFrame, str]:
-    frames = [pd.read_csv(DATA_PATH)]
-    status = "bundled data"
-    try:
-        frames.append(fetch_live())
-        status = "live data"
-    except Exception as exc:
-        status = f"bundled data (live feed unavailable: {type(exc).__name__})"
-    return normalise(pd.concat(frames, ignore_index=True)), status
-
-
-def picks(df: pd.DataFrame, g: Game) -> np.ndarray:
-    return df[NUM_COLS[: g.picks]].to_numpy(dtype=int)
+        try:
+            slots = slots_for(df, g)
+            if slots:
+                reports.append(analyze_game(g, slots))
+        except Exception as exc:  # one game failing must not take the page down
+            errors[g.label] = f"{type(exc).__name__}: {exc}"
+    return df, status, reports, errors
 
 
 # --------------------------------------------------------------------------- #
-# The strategy: every signal blended into one score
-# --------------------------------------------------------------------------- #
-# long-run frequency, recent trend (50 draws), short trend (20 draws), overdue
-W_FREQ, W_R50, W_R20, W_DUE = 0.30, 0.25, 0.15, 0.30
-
-
-def zs(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=float)
-    s = x.std()
-    return (x - x.mean()) / s if s > 0 else np.zeros_like(x)
-
-
-def blend_scores(prev: np.ndarray, g: Game) -> np.ndarray:
-    """Score each value using past draws (newest first). Higher = better.
-
-    Unordered games -> shape (size,). Ordered games -> (picks, size).
-    """
-    D = len(prev)
-    if g.ordered:
-        out = np.zeros((g.picks, g.size))
-        grid = np.arange(g.size)
-        for i in range(g.picks):
-            col = prev[:, i] - g.low
-            seen = col[:, None] == grid[None, :]
-            gap = np.where(seen.any(0), seen.argmax(0), D)
-            out[i] = (
-                W_FREQ * zs(np.bincount(col, minlength=g.size))
-                + W_R50 * zs(np.bincount(col[:50], minlength=g.size))
-                + W_R20 * zs(np.bincount(col[:20], minlength=g.size))
-                + W_DUE * zs(gap)
-            )
-        return out
-    values = np.arange(g.low, g.high + 1)
-    present = (prev[:, :, None] == values[None, None, :]).any(axis=1)
-    gap = np.where(present.any(0), present.argmax(0), D)
-
-    def count(rows: np.ndarray) -> np.ndarray:
-        return np.bincount((rows - g.low).ravel(), minlength=g.size)
-
-    return W_FREQ * zs(count(prev)) + W_R50 * zs(count(prev[:50])) + W_R20 * zs(count(prev[:20])) + W_DUE * zs(gap)
-
-
-@lru_cache(maxsize=None)
-def combo_index(m: int, k: int) -> np.ndarray:
-    return np.array(list(itertools.combinations(range(m), k)))
-
-
-def make_picks(prev: np.ndarray, g: Game, n: int = 3) -> list[list[int]]:
-    """Best line first, then backups. Lotto lines must also look 'typical':
-    balanced odd/even and high/low, normal sum, no long runs of consecutive numbers."""
-    score = blend_scores(prev, g)
-    if g.ordered:
-        best = score.argmax(axis=1)
-        top2 = np.sort(score, axis=1)
-        margin = top2[:, -1] - top2[:, -2]
-        runner = np.argsort(-score, axis=1)[:, 1]
-        lines = [best + g.low]
-        for pos in np.argsort(margin)[: n - 1]:  # flip the least-certain positions
-            alt = best.copy()
-            alt[pos] = runner[pos]
-            lines.append(alt + g.low)
-        return [ln.tolist() for ln in lines]
-
-    k = g.picks
-    order = np.argsort(-score)[:14]
-    idx = combo_index(len(order), k)
-    nums = order[idx] + g.low
-    total = score[order][idx].sum(axis=1)
-    sums = nums.sum(axis=1)
-    odd = (nums % 2).sum(axis=1)
-    high = (nums > (g.low + g.high) / 2).sum(axis=1)
-    consecutive = (np.diff(np.sort(nums, axis=1), axis=1) == 1).sum(axis=1)
-    lo, hi = np.percentile(prev.sum(axis=1), [10, 90])
-    ok = (np.abs(odd - k / 2) <= 1) & (np.abs(high - k / 2) <= 1) & (sums >= lo) & (sums <= hi) & (consecutive <= 1)
-    if not ok.any():
-        ok[:] = True
-    total = np.where(ok, total, -np.inf)
-    best = np.argsort(-total)[:n]
-    return [sorted(nums[i].tolist()) for i in best if np.isfinite(total[i])]
-
-
-# --------------------------------------------------------------------------- #
-# Rendering
+# HTML helpers
 # --------------------------------------------------------------------------- #
 def fmt(n: int, g: Game) -> str:
     return f"{n:02d}" if g.wide else str(n)
 
 
-def balls(line, g: Game, cls: str, hits: list[bool] | None = None, small: bool = False) -> str:
+def balls(line, g: Game, kind: str = "", hits: list[bool] | None = None, small: bool = False) -> str:
     out = []
     for i, n in enumerate(line):
-        c = f"ball {cls}" + (" small" if small else "")
-        if hits is not None:
-            c = "ball small " + ("hit" if hits[i] else "miss")
-        out.append(f"<span class='{c}'>{fmt(int(n), g)}</span>")
-    return f"<div class='balls'>{''.join(out)}</div>"
+        cls = kind if hits is None else ("hit" if hits[i] else "miss")
+        out.append(f"<span class='ball {cls}{' small' if small else ''}'>{fmt(int(n), g)}</span>")
+    return "<div class='balls'>" + "".join(out) + "</div>"
 
 
-def peso(v) -> str:
-    return f"₱{v:,.0f}" if pd.notna(v) else "—"
-
-
-def clock12(t: str) -> str:
-    try:
-        return pd.to_datetime(t, format="%H:%M").strftime("%I:%M %p").lstrip("0")
-    except Exception:
-        return t
-
-
-def hit_flags(pick: list[int], actual: np.ndarray, g: Game) -> list[bool]:
+def hit_flags(combo, latest, g: Game) -> list[bool]:
     if g.ordered:
-        return [int(p) == int(a) for p, a in zip(pick, actual)]
-    return [p in set(actual.tolist()) for p in pick]
+        return [int(a) == int(b) for a, b in zip(combo, latest)]
+    drawn = {int(x) for x in latest}
+    return [int(a) in drawn for a in combo]
 
 
-def slot_card(g: Game, slot: pd.DataFrame) -> str:
-    arr = picks(slot, g)
-    latest = slot.iloc[0]
-    when = f"{latest['ts']:%a, %b %d}"
-    title = g.label + (f" · {clock12(latest['draw_time'])}" if latest["draw_time"] else "")
+def scored_rows(combos, latest, g: Game) -> str:
+    rows = []
+    for i, c in enumerate(combos, 1):
+        flags = hit_flags(c, latest, g)
+        rows.append(
+            f"<div class='row'><span class='idx'>{i}</span>{balls(c, g, hits=flags, small=True)}"
+            f"<span class='score'>{sum(flags)}/{g.picks}</span></div>"
+        )
+    return "".join(rows)
 
-    prev_pick = make_picks(arr[1 : 1 + LOOKBACK], g, 1)[0]
-    flags = hit_flags(prev_pick, arr[0], g)
-    next_picks = make_picks(arr[:LOOKBACK], g, 3)
 
-    prize_word = "Top prize" if g.ordered else "Jackpot"
-    winners = int(latest["winners"])
-    prize = f"{prize_word} {peso(latest['jackpot_php'])} · {winners:,} winner{'' if winners == 1 else 's'}"
+def new_rows(combos, g: Game) -> str:
+    return "".join(f"<div class='row'><span class='idx'>{i}</span>{balls(c, g, 'pick')}</div>" for i, c in enumerate(combos, 1))
 
-    backups = "".join(
-        f"<div class='backup'>Backup &nbsp;{' &nbsp;'.join(fmt(n, g) for n in line)}</div>" for line in next_picks[1:]
+
+def peso(v: float) -> str:
+    return f"₱{v:,.0f}" if v == v else "—"
+
+
+def slot_card(rep: GameReport, sp: SlotPicks) -> str:
+    g = rep.game
+    when = pd.Timestamp(sp.latest_date).strftime("%a, %b %d, %Y")
+    prize = f"{'Top prize' if g.ordered else 'Jackpot'} {peso(sp.latest_prize)}"
+    winners = f"{sp.latest_winners:,} winner{'' if sp.latest_winners == 1 else 's'}"
+    best = max(sp.previous_matches)
+    check = (
+        f"<div class='check'><b>Model check</b> · on the {rep.holdout_draws} most recent draws it averaged "
+        f"<b>{rep.model_matches:.2f}</b> matches per combination; random picks average <b>{rep.chance_matches:.2f}</b>. "
+        f"{rep.verdict}.</div>"
     )
     return (
-        f"<div class='card'><div class='head'>{title}</div>"
-        f"<div class='label'>Latest result · {when}</div>{balls(arr[0], g, 'result')}"
-        f"<div class='note'>{prize}</div>"
-        f"<div class='label'>Our last pick · matched {sum(flags)} of {g.picks}</div>"
-        f"{balls(prev_pick, g, '', flags, small=True)}"
-        f"<div class='label'>Pick for the next draw</div>{balls(next_picks[0], g, 'pick')}{backups}</div>"
+        "<div class='card'>"
+        f"<div class='top'><div><div class='name'>{sp.name}</div>"
+        f"<div class='sub'>Latest draw · {when}</div></div><span class='pill'>Best last pick {best}/{g.picks}</span></div>"
+        "<div class='cols'><div>"
+        "<div class='label'>Latest result</div>"
+        f"{balls(sp.latest, g, 'result')}"
+        f"<div class='note'>{prize} · {winners}</div>"
+        "<div class='label'>Our last 5 picks, scored</div>"
+        f"{scored_rows(sp.previous, sp.latest, g)}"
+        "</div><div>"
+        "<div class='label'>New picks for the next draw</div>"
+        f"{new_rows(sp.upcoming, g)}"
+        "</div></div>"
+        f"{check}</div>"
     )
 
 
 # --------------------------------------------------------------------------- #
 # Page
 # --------------------------------------------------------------------------- #
-df_all, data_status = get_data()
-if df_all.empty:
-    st.error("No draw data could be loaded.")
+with st.spinner("Training models on the full draw history (first load takes a few seconds)..."):
+    df_all, data_status, reports, errors = build_reports()
+
+if not reports:
+    st.error("The models could not be built. " + "; ".join(f"{k}: {v}" for k, v in errors.items()))
     st.stop()
 
-st.title("🎱 Lotto Lab")
 st.markdown(
-    "<span class='foot'>Picks for every game. They stay the same until a new result comes in, "
-    "then the old pick is checked against it and a new one is made.</span>",
+    "<div class='hero'><h1>🎱 Lotto Lab</h1>"
+    "<p>Machine-learning picks for every PCSO game. Last picks are scored against the newest results, then fresh ones are made.</p></div>",
     unsafe_allow_html=True,
 )
 
-for g in GAMES:
-    hist = df_all[df_all["game"] == g.key]
-    recent_times = hist.head(60)["draw_time"].unique().tolist()
-    times = sorted(t for t in recent_times if (hist["draw_time"] == t).sum() > 60) or [None]
-    for t in times:
-        slot = hist if t is None else hist[hist["draw_time"] == t]
-        if len(slot) < 60:
-            continue
-        st.markdown(slot_card(g, slot), unsafe_allow_html=True)
+best_pick = max(
+    ((max(sp.previous_matches), sp.name, rep.game.picks) for rep in reports for sp in rep.slots),
+    key=lambda t: t[0] / t[2],
+)
+st.markdown(
+    "<div class='stats'>"
+    f"<div class='stat'><div class='k'>Draws learned from</div><div class='v'>{len(df_all):,}</div></div>"
+    f"<div class='stat'><div class='k'>Newest result</div><div class='v'>{df_all['draw_date'].max():%b %d, %Y}</div></div>"
+    f"<div class='stat'><div class='k'>Best last pick</div><div class='v'>{best_pick[0]}/{best_pick[2]} · {best_pick[1].split(' · ')[0]}</div></div>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+labels = {r.game.key: r.game.label for r in reports}
+choice = st.pills("Game", ["All games"] + list(labels.values()), default="All games", label_visibility="collapsed")
+shown = [r for r in reports if choice in (None, "All games", r.game.label)]
+
+for rep in shown:
+    for sp in rep.slots:
+        st.markdown(slot_card(rep, sp), unsafe_allow_html=True)
+
+for name, err in errors.items():
+    st.warning(f"{name} is temporarily unavailable ({err}).")
+
+with st.expander("How the picks are made"):
+    st.markdown(
+        "1. **Learn from history.** All past draws for a game (back to 2016) become training data.\n"
+        "2. **Score every number.** About 25 signals per number - long-run and recent rates, how overdue it is, "
+        "whether it appeared in the last few draws, which numbers it tends to appear with - feed a gradient-boosting "
+        "model and a logistic-regression model. Their average is each number's probability.\n"
+        "3. **Build 5 different combinations.** Highest joint probability, kept balanced (odd/even, high/low, typical total) "
+        "and different from each other.\n"
+        "4. **Check against reality.** The model is trained only on the past and tested on the most recent draws, "
+        "and the result is shown honestly on each card.\n\n"
+        "Lottery draws are random, so expect the model to perform like random picks. Use it for fun and play responsibly."
+    )
 
 st.divider()
-left, right = st.columns([3, 1])
+left, right = st.columns([5, 1])
 left.markdown(
-    f"<span class='foot'>Source: {data_status} · latest draw {df_all['draw_date'].max():%b %d, %Y}. "
-    "Results from PCSO via lottotayo/pcso-lotto-results; not affiliated with PCSO. "
-    "Every draw is random, so no method can guarantee a win. Play responsibly.</span>",
+    f"<span class='note'>Data: {data_status}, built from PCSO results (your spreadsheet plus the public "
+    "lottotayo/pcso-lotto-results dataset). Not affiliated with PCSO. For entertainment only.</span>",
     unsafe_allow_html=True,
 )
 if right.button("Refresh"):
-    get_data.clear()
+    build_reports.clear()
     st.rerun()

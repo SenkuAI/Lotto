@@ -18,6 +18,7 @@ Lottery draws are random. Not affiliated with PCSO.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -41,7 +42,7 @@ st.markdown(
     #MainMenu, footer, header[data-testid="stHeader"] {{visibility: hidden; height: 0;}}
     .hero h1 {{margin:0; font-size:2.5rem; font-weight:800; letter-spacing:-.03em; color:{INK};}}
     .hero p {{margin:.3rem 0 1.1rem; color:{MUTED}; font-size:1.05rem;}}
-    .stats {{display:grid; grid-template-columns:repeat(3,1fr); gap:.9rem; margin:.4rem 0 1.4rem;}}
+    .stats {{display:grid; grid-template-columns:repeat(4,1fr); gap:.9rem; margin:.4rem 0 1.4rem;}}
     .stat {{background:#fffefb; border:1px solid {LINE}; border-radius:18px; padding:.9rem 1.1rem;
             box-shadow:0 1px 2px rgba(60,50,30,.04);}}
     .stat .k {{color:{MUTED}; font-size:.78rem; font-weight:600; text-transform:uppercase; letter-spacing:.07em;}}
@@ -55,7 +56,7 @@ st.markdown(
             font-size:.85rem; font-weight:600;}}
     .label {{color:{MUTED}; font-size:.8rem; font-weight:700; text-transform:uppercase; letter-spacing:.08em; margin:1.2rem 0 .35rem;}}
     .cols {{display:grid; grid-template-columns:1fr 1.25fr; gap:1.8rem;}}
-    @media (max-width: 760px) {{.cols {{grid-template-columns:1fr;}} .stats {{grid-template-columns:1fr;}}}}
+    @media (max-width: 760px) {{.cols {{grid-template-columns:1fr;}} .stats {{grid-template-columns:repeat(2,1fr);}}}}
     .balls {{display:flex; gap:.5rem; flex-wrap:wrap;}}
     .ball {{display:inline-flex; align-items:center; justify-content:center; width:3.1rem; height:3.1rem; border-radius:50%;
             font-weight:700; font-size:1.45rem; color:{INK}; border:1px solid rgba(0,0,0,.07);}}
@@ -98,6 +99,20 @@ def build_reports() -> tuple[pd.DataFrame, str, list[GameReport], dict[str, str]
 # --------------------------------------------------------------------------- #
 # HTML helpers
 # --------------------------------------------------------------------------- #
+def track_stat() -> str:
+    """Live, out-of-sample record: picks logged BEFORE each draw, scored AFTER it (see scripts/update_results.py)."""
+    label, value = "Live track record", "Begins next draw"
+    try:
+        done = pd.read_csv(Path(__file__).parent / "data" / "pick_log.csv").dropna(subset=["scored_date"])
+        if len(done):
+            gain = float((done["avg_matches"].astype(float) - done["chance_avg"].astype(float)).mean())
+            label, value = f"Live track record · {len(done)} draws", f"{gain:+.3f} vs random"
+    except Exception:
+        pass
+    tip = "Average matches per combination, picks made before each draw, minus what random picks average."
+    return f"<div class='stat' title='{tip}'><div class='k'>{label}</div><div class='v'>{value}</div></div>"
+
+
 def fmt(n: int, g: Game) -> str:
     return f"{n:02d}" if g.wide else str(n)
 
@@ -190,6 +205,7 @@ st.markdown(
     f"<div class='stat'><div class='k'>Draws learned from</div><div class='v'>{len(df_all):,}</div></div>"
     f"<div class='stat'><div class='k'>Newest result</div><div class='v'>{df_all['draw_date'].max():%b %d, %Y}</div></div>"
     f"<div class='stat'><div class='k'>Best last pick</div><div class='v'>{best_pick[0]}/{best_pick[2]} · {best_pick[1].split(' · ')[0]}</div></div>"
+    f"{track_stat()}"
     "</div>",
     unsafe_allow_html=True,
 )

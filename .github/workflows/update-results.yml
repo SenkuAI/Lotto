@@ -1,0 +1,48 @@
+name: Update results
+
+# Draws happen at 2 PM, 5 PM and 9 PM Manila time (UTC+8). These runs follow each of them
+# and one more in the early morning for late postings. They can also be started by hand
+# from the Actions tab.
+on:
+  schedule:
+    - cron: "30 7,10,14,16 * * *"   # 3:30 PM, 6:30 PM, 10:30 PM, 12:30 AM Manila
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-results
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install only what the update needs
+        run: pip install pandas numpy requests scikit-learn
+
+      - name: Fetch new results, score old picks, log new picks
+        run: python scripts/update_results.py --no-xlsx
+
+      - name: Commit changes (Streamlit Cloud redeploys and retrains on its own)
+        run: |
+          git add data/draws.csv.gz data/pick_log.csv
+          if git diff --cached --quiet; then
+            echo "Nothing new."
+          else
+            git config user.name "lotto-bot"
+            git config user.email "lotto-bot@users.noreply.github.com"
+            git commit -m "Add new results and update pick log"
+            git pull --rebase
+            git push
+          fi

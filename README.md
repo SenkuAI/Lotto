@@ -29,6 +29,19 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Keeping it up to date
+
+New results are picked up automatically:
+
+- **In the cloud:** `.github/workflows/update-results.yml` runs after each draw time. It adds new draws to
+  `data/draws.csv.gz`, scores the picks logged earlier against the draws that have since happened, logs fresh picks
+  in `data/pick_log.csv`, and commits. Streamlit Cloud redeploys on that commit, so the models retrain on the new results.
+- **On your computer:** `python scripts/update_results.py` does the same and also inserts the new rows at the top of
+  `Lotto results.xlsx` (close the file in Excel first). The spreadsheet is kept local and is not committed.
+
+`data/pick_log.csv` is the honest, out-of-sample track record shown on the page: every pick is stored before its draw
+and scored after it.
+
 ## Rebuild the data from the spreadsheet
 
 ```powershell

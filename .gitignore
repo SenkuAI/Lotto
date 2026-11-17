@@ -5,5 +5,7 @@ venv/
 .env
 .streamlit/secrets.toml
 logs/
+Lotto results.xlsx
+*.tmp.xlsx
 .vscode/
 .DS_Store

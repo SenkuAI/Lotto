@@ -11,6 +11,13 @@ Picks are a pure function of the results, so they only change when a new result 
 
 > Lottery draws are random. The model check on every card shows whether the model beats random picks; so far it doesn't. For entertainment only. Not affiliated with PCSO.
 
+## Avoiding shared jackpots
+
+In the jackpot games (6/58, 6/55, 6/49, 6/45, 6/42) the builder also penalises lines many players are likely to hold:
+mostly birthday numbers (31 or lower), runs of consecutive numbers and arithmetic sequences. This does **not** change your
+chance of winning (every line is equally likely) but a rarer line is less likely to share the jackpot if it does win.
+The effect is a modelling assumption based on how people are known to pick numbers in general, not something measured on PCSO players.
+
 ## How it works
 
 | File | Role |
@@ -33,7 +40,7 @@ streamlit run app.py
 
 New results are picked up automatically:
 
-- **In the cloud:** `.github/workflows/update-results.yml` runs after each draw time. It adds new draws to
+- **In the cloud:** `.github/workflows/update-results.yml` runs every 3 hours (a run with nothing new takes about a minute). It adds new draws to
   `data/draws.csv.gz`, scores the picks logged earlier against the draws that have since happened, logs fresh picks
   in `data/pick_log.csv`, and commits. Streamlit Cloud redeploys on that commit, so the models retrain on the new results.
 - **On your computer:** `python scripts/update_results.py` does the same and also inserts the new rows at the top of

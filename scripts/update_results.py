@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import warnings
@@ -42,6 +43,15 @@ LEDGER = ROOT / "data" / "pick_log.csv"
 SHEET = "Lotto Results"
 NAME_FOR = {(key, time): name for name, (key, time, *_rest) in build_data.GAME_MAP.items()}
 LEDGER_COLS = ["game", "draw_time", "after_date", "combos", "scored_date", "matches", "avg_matches", "chance_avg"]
+
+
+def note(text: str) -> None:
+    """Print, and also put it on the GitHub run's summary page when running there."""
+    print(text)
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(text + "\n\n")
 
 
 # --------------------------------------------------------------------------- #
@@ -174,13 +184,16 @@ def main() -> int:
     try:
         new = find_new(args.pages)
     except Exception as exc:
-        print(f"Could not reach the live results feed: {type(exc).__name__}: {exc}")
-        return 1
+        # The free feed has occasional outages. The next scheduled run catches up, so this is
+        # a warning rather than a failed run; the app also shows a notice when results look stale.
+        print(f"::warning::Results feed unreachable ({type(exc).__name__}: {exc}); will retry on the next run.")
+        note(f"Results feed unreachable ({type(exc).__name__}). Nothing changed; the next run will retry.")
+        return 0
 
     if new.empty:
-        print("No new results - already up to date.")
+        note("No new results - already up to date.")
     else:
-        print(f"{len(new)} new results:")
+        note(f"{len(new)} new results found.")
         print(new.groupby("game")["draw_date"].agg(["count", "min", "max"]).to_string())
         if args.dry_run:
             return 0

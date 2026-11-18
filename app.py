@@ -17,14 +17,15 @@ Lottery draws are random. Not affiliated with PCSO.
 
 from __future__ import annotations
 
+import math
 import warnings
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
-from lotto_core import GAMES, Game, load_draws, slots_for
-from lotto_model import GameReport, SlotPicks, analyze_game
+from lotto_core import BY_KEY, GAMES, Game, load_draws, slots_for
+from lotto_model import GameReport, SlotPicks, analyze_game, chance_stats
 
 warnings.filterwarnings("ignore")
 
@@ -47,6 +48,7 @@ st.markdown(
             box-shadow:0 1px 2px rgba(60,50,30,.04);}}
     .stat .k {{color:{MUTED}; font-size:.78rem; font-weight:600; text-transform:uppercase; letter-spacing:.07em;}}
     .stat .v {{color:{INK}; font-size:1.45rem; font-weight:700; margin-top:.1rem;}}
+    .stat .s {{color:{MUTED}; font-size:.82rem; margin-top:.15rem;}}
     .card {{background:#fffefb; border:1px solid {LINE}; border-radius:24px; padding:1.5rem 1.7rem; margin-bottom:1.3rem;
             box-shadow:0 1px 2px rgba(60,50,30,.04), 0 10px 30px rgba(60,50,30,.06);}}
     .card .top {{display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap;}}
@@ -101,16 +103,20 @@ def build_reports() -> tuple[pd.DataFrame, str, list[GameReport], dict[str, str]
 # --------------------------------------------------------------------------- #
 def track_stat() -> str:
     """Live, out-of-sample record: picks logged BEFORE each draw, scored AFTER it (see scripts/update_results.py)."""
-    label, value = "Live track record", "Begins next draw"
+    label, value, sub = "Live track record", "Begins next draw", "Picks are scored after each draw"
     try:
         done = pd.read_csv(Path(__file__).parent / "data" / "pick_log.csv").dropna(subset=["scored_date"])
         if len(done):
-            gain = float((done["avg_matches"].astype(float) - done["chance_avg"].astype(float)).mean())
-            label, value = f"Live track record · {len(done)} draws", f"{gain:+.3f} vs random"
+            excess = done["avg_matches"].astype(float) - done["chance_avg"].astype(float)
+            # conservative: one draw's variance per scored row, even though each row averages 5 combinations
+            z = float(excess.sum()) / math.sqrt(sum(chance_stats(BY_KEY[k])[1] for k in done["game"]))
+            label, value = f"Live track record · {len(done)} draws", f"{excess.mean():+.3f} vs random"
+            verdict = "Within normal luck" if abs(z) < 2 else ("Above chance so far, may still be luck" if z > 0 else "Below chance so far")
+            sub = f"{verdict} (z = {z:+.1f})"
     except Exception:
         pass
     tip = "Average matches per combination, picks made before each draw, minus what random picks average."
-    return f"<div class='stat' title='{tip}'><div class='k'>{label}</div><div class='v'>{value}</div></div>"
+    return f"<div class='stat' title='{tip}'><div class='k'>{label}</div><div class='v'>{value}</div><div class='s'>{sub}</div></div>"
 
 
 def fmt(n: int, g: Game) -> str:
@@ -209,6 +215,13 @@ st.markdown(
     "</div>",
     unsafe_allow_html=True,
 )
+
+lag_days = (pd.Timestamp.now(tz="Asia/Manila").tz_localize(None).normalize() - df_all["draw_date"].max()).days
+if lag_days >= 2:
+    st.info(
+        f"The newest result in the data is from {df_all['draw_date'].max():%b %d}, so the results feed may be running behind. "
+        "Picks update automatically as soon as new draws appear."
+    )
 
 labels = {r.game.key: r.game.label for r in reports}
 choice = st.pills("Game", ["All games"] + list(labels.values()), default="All games", label_visibility="collapsed")

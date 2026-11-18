@@ -19,6 +19,12 @@ A pick is then the set of combinations with the highest joint probability that
 also pass a "typical draw" filter (odd/even, high/low, sum, no long runs), and
 the 5 combinations are chosen to differ from each other.
 
+In the jackpot games (lines of 6 numbers) a "popularity" penalty also steers away
+from lines many players are likely to share: mostly birthday numbers (<= 31),
+runs of consecutive numbers, and arithmetic sequences. This does NOT change the
+chance of winning - every line is equally likely - but if a shared line wins, the
+jackpot is split, so a rarer line has a higher expected payout.
+
 Honesty: a walk-forward hold-out test (train on the past, score the most recent
 draws) is run for every game, so the app can show whether the model beats plain
 chance. Lottery draws are random, so expect it not to.
@@ -43,7 +49,9 @@ WARMUP = 80  # draws of history needed before a row is used for training
 MAX_DRAWS = 600  # most recent draws per slot used for training
 HOLDOUT = 200  # most recent draws kept aside for the honesty test
 N_COMBOS = 5
-POOL = 14  # lotto games: combinations are built from the 14 most likely numbers
+POOL = 16  # lotto games: combinations are built from the 16 most likely numbers
+POPULARITY_WEIGHT = 1.0  # strength of the "avoid lines other players share" penalty (0 = off)
+BIRTHDAY_MAX = 31  # numbers up to this are over-picked because they are birthdays / days of the month
 
 
 # --------------------------------------------------------------------------- #
@@ -196,12 +204,22 @@ def _product_idx(m: int, k: int) -> np.ndarray:
     return np.array(list(itertools.product(range(m), repeat=k)), dtype=np.int16)
 
 
+def popularity(nums: np.ndarray) -> np.ndarray:
+    """How likely other players are to hold a similar line (higher = more shared). nums: (C, k)."""
+    ordered = np.sort(nums, axis=1)
+    steps = np.diff(ordered, axis=1)
+    birthday = (nums <= BIRTHDAY_MAX).sum(axis=1)
+    runs = (steps == 1).sum(axis=1)
+    sequence = (steps == steps[:, :1]).all(axis=1)  # e.g. 5-10-15-20-25-30
+    return 0.35 * birthday + 0.5 * runs + 2.0 * sequence
+
+
 def combos_unordered(p: np.ndarray, g: Game, sums_ref: tuple[float, float], n: int = N_COMBOS) -> list[list[int]]:
     k, N = g.picks, g.size
     pool = np.argsort(-p)[:POOL]
     vals = pool[_combo_idx(len(pool), k)].astype(int)  # (C, k) zero-based values
     nums = vals + g.low
-    score = np.log(p)[vals].sum(axis=1)
+    score = np.log(p)[vals].sum(axis=1) - POPULARITY_WEIGHT * popularity(nums)
     C = len(nums)
     odd = (nums % 2).sum(axis=1)
     high = (nums > (g.low + g.high) / 2).sum(axis=1)

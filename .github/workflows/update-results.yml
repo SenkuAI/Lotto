@@ -1,11 +1,11 @@
 name: Update results
 
-# Draws happen at 2 PM, 5 PM and 9 PM Manila time (UTC+8). These runs follow each of them
-# and one more in the early morning for late postings. They can also be started by hand
-# from the Actions tab.
+# Draws happen at 2 PM, 5 PM and 9 PM Manila time (UTC+8), and the free results feed posts them
+# with a delay of a few hours. Checking every 3 hours catches them soon after they appear, and a
+# run with nothing new finishes in about a minute. It can also be started by hand from the Actions tab.
 on:
   schedule:
-    - cron: "30 7,10,14,16 * * *"   # 3:30 PM, 6:30 PM, 10:30 PM, 12:30 AM Manila
+    - cron: "10 */3 * * *"   # every 3 hours, at :10 past (UTC)
   workflow_dispatch:
 
 permissions:
@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
